@@ -64,6 +64,19 @@ and is prohibited. Two versions exist; both hash the same five members identical
   chronological comparison. A `/2` verifier MUST reject a fixed point whose `dataVintage` does not
   match the grammar (outcome: `unverifiable`).
 
+### Agreement semantics (normative)
+
+This extension compares `inputs` and `result` as the JSON values declared, under RFC 8785, with **no
+normalization of any kind**: no Unicode normalization, no case folding, no numeric coercion, no
+timestamp or whitespace reformatting, no key aliasing. Two inputs that a human would call the same
+question but that differ in shape (`"2026-07-01"` vs `"2026-07-01T00:00:00Z"`, `"Café"` in NFC vs NFD,
+`42` vs `"42"`) are **two different questions** and hash differently; a re-derivation across them is
+`contradicted`, not a silent match. `fixedPointVersion` is the record's declaration of this semantics:
+every `GVP-FixedPoint/*` rule set is byte-exact after JCS (pinned-class), and a rule set that
+normalized any field would be a new identifier, never a reinterpretation of an existing one. A
+verifier MUST NOT normalize any member before canonicalizing; an implementation that does is
+non-conformant even when its hashes happen to agree.
+
 ### Member carriage — where a verifier finds each member
 
 An issuer emitting this extension MUST make every fixed-point member recoverable as follows:
@@ -72,7 +85,7 @@ An issuer emitting this extension MUST make every fixed-point member recoverable
 |---|---|
 | `endpoint` | the request path as served (path only; see [Security considerations](#security-considerations) for issuer scoping) — also RECOMMENDED as a top-level response-body member `endpoint` |
 | `inputs` | derived from the request per the [request mapping](#request--inputs-mapping) |
-| `result` | REQUIRED top-level response-body member `result` |
+| `result` | per `resultCarriage` (below): `"member"` (default) — REQUIRED top-level response-body member `result`; `"body"` — the response body object itself with its top-level `extensions` member removed |
 | `method` | REQUIRED member `method` of the extension object |
 | `dataVintage` | REQUIRED member `dataVintage` of the extension object |
 
@@ -80,6 +93,27 @@ Carrying `method` and `dataVintage` in the extension object (beside the hash, no
 octets) is permitted and required precisely because the self-reference prohibition covers only the
 hash and values derived from it — hashed members restated outside the hashed object are inputs to
 re-derivation, not cycles.
+
+#### `resultCarriage` — declaring where `result` lives
+
+Existing REST APIs overwhelmingly put the answer's fields at the root of the response body; requiring
+a `result` wrapper would force every such seller into a breaking change or a duplicated payload. The
+extension object therefore declares how `result` is carried, with an OPTIONAL member
+`resultCarriage` whose absence means `"member"`:
+
+| `resultCarriage` | `result` is recovered as |
+|---|---|
+| `"member"` (default) | the value of the top-level response-body member `result`, which MUST be present |
+| `"body"` | the response body as parsed, which MUST be a JSON object, with its top-level `extensions` member removed and **nothing else** removed, added, or reordered (order is immaterial under JCS). Any other top-level member — including one named `result` — is part of `result` like any other |
+
+This is a **wire-recovery declaration**, not a mode flag: the fixed point, the closure rule, the hash
+definition, and the single claim `responseHash` carries are unchanged, and the same fixed point
+produces the same hash under either carriage (the [worked vector](#worked-vector-normative) is
+reproduced by both examples in [Envelope](#envelope)). A verifier reads `resultCarriage` before
+recovering `result`; an unrecognised value, `"member"` with no `result` member, or `"body"` on a
+non-object body is `unverifiable` (see [Verification outcomes](#verification-outcomes-normative)).
+Under [signed carriage](#signed-carriage) a non-default `resultCarriage` SHOULD be inside the signed
+payload for the same reason `fixedPointVersion` is.
 
 ### Request → `inputs` mapping
 
@@ -185,7 +219,29 @@ On a paid response body:
 - `responseHash` (REQUIRED): `"sha256:" + lowercase-hex` SHA-256 of the JCS bytes of the fixed point.
 - `fixedPointVersion` (REQUIRED): `"GVP-FixedPoint/1"` or `"GVP-FixedPoint/2"`.
 - `method` (REQUIRED), `dataVintage` (REQUIRED): the fixed-point members, restated for carriage.
+- `resultCarriage` (OPTIONAL, default `"member"`): where `result` lives, per
+  [`resultCarriage`](#resultcarriage--declaring-where-result-lives).
 - `spec` (OPTIONAL): URL of the upstream fixed-point specification (informative; this file governs).
+
+The same claim on an existing root-level API, without wrapping or duplicating the answer:
+
+```json
+{
+  "sum": 5,
+  "extensions": {
+    "response-provenance": {
+      "responseHash": "sha256:81ea1f2227fd9df5b868954e6d26d091810352f148dade483b260844788ede03",
+      "fixedPointVersion": "GVP-FixedPoint/2",
+      "resultCarriage": "body",
+      "method": "sum = a + b, integer addition",
+      "dataVintage": "2026-07"
+    }
+  }
+}
+```
+
+Under `"body"`, `result` is `{ "sum": 5 }` (the body with `extensions` removed), so the fixed point
+and the hash are identical to the first example and to the worked vector.
 
 Because the hash is computed over the canonical form of the parsed JSON value, transport-layer
 transformations (gzip, brotli, chunking, insignificant whitespace) do not affect it. The party that
@@ -195,10 +251,12 @@ honestly attest them.
 ### Signed carriage
 
 When the seller also emits a signed receipt (e.g. the `offer-and-receipt` extension), the signed
-payload SHOULD include **both** `responseHash` **and** `fixedPointVersion`. Signing only the hash
-leaves the version rewritable: an intermediary that alters `result` could also rewrite
-`fixedPointVersion` to an unimplemented value, steering the verification outcome from `contradicted`
-to `unverifiable` — choosing which negative state its tampering produces.
+payload SHOULD include **both** `responseHash` **and** `fixedPointVersion`, and `resultCarriage`
+whenever it is non-default. Signing only the hash leaves the version rewritable: an intermediary
+that alters `result` could also rewrite `fixedPointVersion` to an unimplemented value, steering the
+verification outcome from `contradicted` to `unverifiable` — choosing which negative state its
+tampering produces. An unsigned `resultCarriage` is rewritable the same way (flipping `"body"` to
+`"member"` on a root-level body yields `unverifiable` instead of `contradicted`).
 
 ---
 
@@ -233,8 +291,10 @@ Implementations MUST report which state obtained and MUST NOT collapse them:
 3. **`unverifiable`** — the member is present but cannot be evaluated: unparseable, wrong shape, a
    `fixedPointVersion` the verifier does not implement, a `/2` `dataVintage` failing the grammar, a
    fixed point rejected under the canonicalization restrictions (non-finite numbers, duplicate
-   member names, excessive depth), or a body-less request whose query string is malformed under the
-   [decode grammar](#request--inputs-mapping).
+   member names, excessive depth), a body-less request whose query string is malformed under the
+   [decode grammar](#request--inputs-mapping), or a `result` that cannot be recovered under the
+   declared [`resultCarriage`](#resultcarriage--declaring-where-result-lives) (unrecognised value,
+   `"member"` with no `result` member, `"body"` on a non-object body).
 4. **`contradicted`** — re-derivation ran and the hash does not match. This finding is a
    **three-branch disjunction**: *the artifact was altered, or it was issued in violation of the
    closure rule, or the verifier's own implementation is defective on this input.* Before reporting
