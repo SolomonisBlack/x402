@@ -115,6 +115,14 @@ non-object body is `unverifiable` (see [Verification outcomes](#verification-out
 Under [signed carriage](#signed-carriage) a non-default `resultCarriage` SHOULD be inside the signed
 payload for the same reason `fixedPointVersion` is.
 
+*Informative.* Under `"body"`, the [closure rule](#issuer-requirements) and `dataVintage`
+completeness apply to **every** top-level member of the body, seller metadata included: a
+consultation timestamp, an age or a window computed at request time, a freshness phrase. Such a
+member is a hidden input to `result`. A seller whose envelope carries one removes it from the
+route, makes its input explicit, or uses `"member"`. This already follows from "nothing else
+removed"; it is stated because a reviewer found three such members on a real catalogue of routes
+that were closure-safe by handler code, and the next seller should not have to discover it.
+
 ### Request → `inputs` mapping
 
 Two honest implementations must not disagree on what `inputs` is. The normative default mapping:
