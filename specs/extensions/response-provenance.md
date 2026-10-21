@@ -276,9 +276,9 @@ field is unauthenticated until the signature checks, so a `did:web` `kid` whose 
 `resourceUrl` domain is `contradicted`, not something to go and fetch. The outcome then splits so that
 a rewritten `kid`, `alg` or key cannot let an intermediary choose `unverifiable`:
 
-- **`unverifiable`**: the paid origin's key list (or DID document) cannot be fetched, or the resolved
-  key's algorithm is one the verifier does not implement.
-- **`contradicted`**: the key list was fetched and does not contain `kid`; or the signed `alg` differs
+- **`unverifiable`**: the paid origin's key list (or DID document) cannot be fetched and no kept key
+  covers the `kid`, or the resolved key's algorithm is one the verifier does not implement.
+- **`contradicted`**: the key list was fetched and does not contain `kid`, and no kept key holds it; or the signed `alg` differs
   from the key's algorithm, including an unknown string; or a `did:web` `kid` names a domain other
   than the `resourceUrl` domain; or the signature does not verify.
 
@@ -294,10 +294,23 @@ post-quantum signature (ML-DSA-65: 3,309 bytes) does not fit a header-carried `P
 encoded; such receipts SHOULD travel in the body or as a detached receipt object, with the key by
 `kid`.
 
+**Kept keys (last-known-good).** A published binding never changes (Issuer requirement 4), so a
+verifier MAY keep the keys it has resolved from an origin, first binding per `kid` winning, and keep
+using them after the origin stops resolving. A kept key proves presence, never absence. While the
+origin is unreachable, a `kid` the verifier holds is evaluated against the kept key; any other `kid`
+stays `unverifiable`. A fetched binding that drops or rebinds a kept `kid` breaks Issuer requirement 4:
+the kept key governs that `kid`, and the verifier MUST report the discontinuity, which shows that two
+fetches disagree, not which one was honest. A result that rests on a kept key MUST be reported with the
+time that key was last confirmed by a fetch. Kept keys are the
+verifier's own state, built only from its own fetches from the paid origin. Without them, an origin
+that stops resolving leaves its signed receipts `unverifiable`, and one that changes hands and
+publishes different keys leaves them `contradicted`; re-deriving `responseHash` never
+depended on the origin and keeps working.
+
 None of this touches the hash: `responseHash`, the fixed point and the worked vector are unchanged.
 The upstream specification implements these rules for its own signed payload as
-`GVP-Attestation/3`, with an outcome-vector set (`vectors/attestation-outcomes.json`) covering the
-key-list, `kid` and `alg` cases above.
+`GVP-Attestation/3`, with outcome-vector sets covering the key-list, `kid` and `alg` cases above
+(`vectors/attestation-outcomes.json`) and kept keys (`vectors/attestation-kept.json`).
 
 ---
 
@@ -317,9 +330,10 @@ key-list, `kid` and `alg` cases above.
    stored") is a different claim and MUST NOT be emitted under this field name.
 4. **Keys stay resolvable (normative, signed carriage).** An issuer that signs the provenance members
    MUST keep every key it has signed with resolvable from the paid origin for the life of its receipts,
-   including after rotation. A binding that reflects only current keys (e.g. a `did:web` document that
-   drops a rotated-out key) is not sufficient on its own. [Signed carriage](#signed-carriage) reports a
-   `kid` missing from the published keys as `contradicted` and depends on this rule.
+   including after rotation, and a `kid`, once published, MUST stay bound to the same key and
+   algorithm. A binding that reflects only current keys (e.g. a `did:web` document that drops a
+   rotated-out key) is not sufficient on its own. [Signed carriage](#signed-carriage) reports a
+   `kid` missing from the published keys, and not kept, as `contradicted` and depends on this rule.
 
 ---
 
@@ -341,8 +355,8 @@ Implementations MUST report which state obtained and MUST NOT collapse them:
    [decode grammar](#request--inputs-mapping), or a `result` that cannot be recovered under the
    declared [`resultCarriage`](#resultcarriage--declaring-where-result-lives) (unrecognised value,
    `"member"` with no `result` member, `"body"` on a non-object body). Under
-   [signed carriage](#signed-carriage), also: the paid origin's key list cannot be fetched, or the
-   resolved key's algorithm is one the verifier does not implement.
+   [signed carriage](#signed-carriage), also: the paid origin's key list cannot be fetched and no kept
+   key covers the `kid`, or the resolved key's algorithm is one the verifier does not implement.
 4. **`contradicted`** — re-derivation ran and the hash does not match. This finding is a
    **three-branch disjunction**: *the artifact was altered, or it was issued in violation of the
    closure rule, or the verifier's own implementation is defective on this input.* Before reporting
@@ -447,7 +461,7 @@ On any divergence between that project and this file, **this file governs** for 
 ## Status and prior art
 
 Shaped by public review on [#3234](https://github.com/x402-foundation/x402/issues/3234) (opened
-2026-08-09; reviewed through 2026-10-16). Adoption and implementation evidence — independent vector
+2026-08-09; reviewed through 2026-10-21). Adoption and implementation evidence — independent vector
 reproductions, a production conformance consumer, sellers evaluating pending this text — is
 maintained with dates and links in the PR body and the thread rather than in this file, where it
 would rot. **Affiliation disclosure:** the live reference issuer (x402toll.com) and the upstream
@@ -455,7 +469,8 @@ conformance repository are operated by this extension's author.
 
 Reviewer-driven normative rules in this text credit: **whawk46** (standalone-vs-receipt layering,
 JCS cross-check; key-first dispatch and the bounded key-list refetch in Signed carriage),
-**0xsims / TenPrint** (`alg` under the signature; the post-quantum carriage sizes), **giskard09** (anchored preimages; the never-collapse failure-mode discipline),
+**0xsims / TenPrint** (`alg` under the signature; the post-quantum carriage sizes), **giskard09** (anchored preimages; the never-collapse failure-mode discipline; the dead-origin
+case behind kept keys),
 **kopko13 / Sirenic** (`dataVintage` completeness — "a freshness field naming three of four sources
 reads as complete"; the two-claims/no-flag resolution —
 [sirenic-eu/sirenic-examples#2](https://github.com/sirenic-eu/sirenic-examples/issues/2)),
