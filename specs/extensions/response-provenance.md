@@ -266,6 +266,39 @@ verification outcome from `contradicted` to `unverifiable` — choosing which ne
 tampering produces. An unsigned `resultCarriage` is rewritable the same way (flipping `"body"` to
 `"member"` on a root-level body yields `unverifiable` instead of `contradicted`).
 
+The same reasoning applies one layer up, to how the signature itself is checked. Whatever signature
+format carries the provenance members, a verifier MUST take the **algorithm from the resolved key,
+never from the receipt** (RFC 8725 §3.1). For `offer-and-receipt` that means the algorithm pinned to
+the key that `kid` resolves to, with the JWS `alg` header required to match it. A verifier MUST also
+resolve the key from context it already holds, meaning the origin it paid (for `offer-and-receipt`, the
+`did:web` document or other binding for the `resourceUrl` domain), never from a receipt field. Every
+field is unauthenticated until the signature checks, so a `did:web` `kid` whose domain is not the
+`resourceUrl` domain is `contradicted`, not something to go and fetch. The outcome then splits so that
+a rewritten `kid`, `alg` or key cannot let an intermediary choose `unverifiable`:
+
+- **`unverifiable`**: the paid origin's key list (or DID document) cannot be fetched, or the resolved
+  key's algorithm is one the verifier does not implement.
+- **`contradicted`**: the key list was fetched and does not contain `kid`; or the signed `alg` differs
+  from the key's algorithm, including an unknown string; or a `did:web` `kid` names a domain other
+  than the `resourceUrl` domain; or the signature does not verify.
+
+A missing `kid` is a contradiction, not a lookup failure, because an issuer signing under this
+extension MUST keep every key it has signed with resolvable for the life of its receipts (Issuer
+requirement 4); it cannot legitimately sign under a key missing from its own published list. A
+verifier holding a cached list refetches once before
+reporting a missing `kid`. Refetches MUST be coalesced per origin and SHOULD be gated by a minimum
+freshness floor (RECOMMENDED: 60 seconds) with a conditional request (`If-None-Match`) where supported.
+Inside the floor the cached list is the fresh read; a refetch that fails is `unverifiable`. Without
+this bound, an intermediary injecting random `kid` values could force a key fetch per response. A
+post-quantum signature (ML-DSA-65: 3,309 bytes) does not fit a header-carried `PAYMENT-RESPONSE` once
+encoded; such receipts SHOULD travel in the body or as a detached receipt object, with the key by
+`kid`.
+
+None of this touches the hash: `responseHash`, the fixed point and the worked vector are unchanged.
+The upstream specification implements these rules for its own signed payload as
+`GVP-Attestation/3`, with an outcome-vector set (`vectors/attestation-outcomes.json`) covering the
+key-list, `kid` and `alg` cases above.
+
 ---
 
 ## Issuer requirements
@@ -282,6 +315,11 @@ tampering produces. An unsigned `resultCarriage` is rewritable the same way (fli
 3. **No mode flags.** `responseHash` carries exactly one claim: re-derivable by anyone. An
    integrity-only claim for non-re-derivable content (e.g. "unaltered relative to what the issuer
    stored") is a different claim and MUST NOT be emitted under this field name.
+4. **Keys stay resolvable (normative, signed carriage).** An issuer that signs the provenance members
+   MUST keep every key it has signed with resolvable from the paid origin for the life of its receipts,
+   including after rotation. A binding that reflects only current keys (e.g. a `did:web` document that
+   drops a rotated-out key) is not sufficient on its own. [Signed carriage](#signed-carriage) reports a
+   `kid` missing from the published keys as `contradicted` and depends on this rule.
 
 ---
 
@@ -302,14 +340,18 @@ Implementations MUST report which state obtained and MUST NOT collapse them:
    member names, excessive depth), a body-less request whose query string is malformed under the
    [decode grammar](#request--inputs-mapping), or a `result` that cannot be recovered under the
    declared [`resultCarriage`](#resultcarriage--declaring-where-result-lives) (unrecognised value,
-   `"member"` with no `result` member, `"body"` on a non-object body).
+   `"member"` with no `result` member, `"body"` on a non-object body). Under
+   [signed carriage](#signed-carriage), also: the paid origin's key list cannot be fetched, or the
+   resolved key's algorithm is one the verifier does not implement.
 4. **`contradicted`** — re-derivation ran and the hash does not match. This finding is a
    **three-branch disjunction**: *the artifact was altered, or it was issued in violation of the
    closure rule, or the verifier's own implementation is defective on this input.* Before reporting
    it, a verifier MUST have reproduced the published conformance vectors (including this file's
    worked vector) with its own implementation. Self-proof shrinks the third branch but cannot
    eliminate it — vectors do not cover every input — so reports SHOULD state vector coverage and
-   SHOULD NOT attribute a branch they cannot see.
+   SHOULD NOT attribute a branch they cannot see. Under [signed carriage](#signed-carriage), a
+   signature that fails the key-first rules there is also `contradicted`; that finding is about the
+   signature, not the re-derivation, and reports SHOULD say which.
 
 What a relying application **does** with a terminal state — complete, withhold, reconcile, dispute —
 is caller policy, owned above this extension. The extension's contract ends at naming the state
@@ -390,8 +432,10 @@ On any divergence between that project and this file, **this file governs** for 
   question without changing the hash. `endpoint` is a path and does not bind the origin: identical
   path + inputs served by two different hosts re-derive identically. Cross-issuer identity is bound
   at the signature layer — the signed receipt names the issuer — not by the hash alone.
-- The extension is payment-rail-agnostic and adds no network surface at verify time: re-derivation
-  is offline, so there is no resolver, callback, or fetch to attack.
+- The extension is payment-rail-agnostic and adds no network surface to re-derivation: it is
+  offline, so there is no resolver, callback, or fetch to attack. The only fetch is under signed
+  carriage: the signer's key list, from the origin the verifier paid, coalesced and floored as
+  [Signed carriage](#signed-carriage) requires.
 - A bare (unsigned) response's extension block can be stripped, or altered and **re-hashed** — a
   forger who changes `result` can recompute a consistent `responseHash`. The unaltered claim
   therefore holds only under signed carriage, with `fixedPointVersion` inside the signed payload
@@ -403,14 +447,15 @@ On any divergence between that project and this file, **this file governs** for 
 ## Status and prior art
 
 Shaped by public review on [#3234](https://github.com/x402-foundation/x402/issues/3234) (opened
-2026-08-09; reviewed through 2026-08-31). Adoption and implementation evidence — independent vector
+2026-08-09; reviewed through 2026-10-16). Adoption and implementation evidence — independent vector
 reproductions, a production conformance consumer, sellers evaluating pending this text — is
 maintained with dates and links in the PR body and the thread rather than in this file, where it
 would rot. **Affiliation disclosure:** the live reference issuer (x402toll.com) and the upstream
 conformance repository are operated by this extension's author.
 
 Reviewer-driven normative rules in this text credit: **whawk46** (standalone-vs-receipt layering,
-JCS cross-check), **giskard09** (anchored preimages; the never-collapse failure-mode discipline),
+JCS cross-check; key-first dispatch and the bounded key-list refetch in Signed carriage),
+**0xsims / TenPrint** (`alg` under the signature; the post-quantum carriage sizes), **giskard09** (anchored preimages; the never-collapse failure-mode discipline),
 **kopko13 / Sirenic** (`dataVintage` completeness — "a freshness field naming three of four sources
 reads as complete"; the two-claims/no-flag resolution —
 [sirenic-eu/sirenic-examples#2](https://github.com/sirenic-eu/sirenic-examples/issues/2)),
